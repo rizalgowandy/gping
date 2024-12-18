@@ -1,106 +1,111 @@
-use crate::{run_ping, Parser, PingDetectionError, PingResult, Pinger};
-use anyhow::Context;
-use regex::Regex;
-use std::time::Duration;
+use crate::{extract_regex, run_ping, PingCreationError, PingOptions, PingResult, Pinger};
+use lazy_regex::*;
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum LinuxPingType {
-    BusyBox,
-    IPTools,
+pub static UBUNTU_RE: Lazy<Regex> = lazy_regex!(r"(?i-u)time=(?P<ms>\d+)(?:\.(?P<ns>\d+))? *ms");
+
+#[derive(Debug)]
+pub enum LinuxPinger {
+    // Alpine
+    BusyBox(PingOptions),
+    // Debian, Ubuntu, etc
+    IPTools(PingOptions),
 }
 
-pub fn detect_linux_ping() -> Result<LinuxPingType, PingDetectionError> {
-    let child = run_ping("ping", vec!["-V".to_string()])?;
-    let output = child
-        .wait_with_output()
-        .context("Error getting ping stdout/stderr")?;
-    let stdout = String::from_utf8(output.stdout).context("Error decoding ping stdout")?;
-    let stderr = String::from_utf8(output.stderr).context("Error decoding ping stderr")?;
+impl LinuxPinger {
+    pub fn detect_platform_ping(options: PingOptions) -> Result<Self, PingCreationError> {
+        let child = run_ping("ping", vec!["-V".to_string()])?;
+        let output = child.wait_with_output()?;
+        let stdout = String::from_utf8(output.stdout).expect("Error decoding ping stdout");
+        let stderr = String::from_utf8(output.stderr).expect("Error decoding ping stderr");
 
-    if stderr.contains("BusyBox") {
-        Ok(LinuxPingType::BusyBox)
-    } else if stdout.contains("iputils") {
-        Ok(LinuxPingType::IPTools)
-    } else if stdout.contains("inetutils") {
-        Err(PingDetectionError::NotSupported {
-            alternative: "Please use iputils ping, not inetutils.".to_string(),
-        })
-    } else {
-        let first_two_lines_stderr: Vec<String> =
-            stderr.lines().take(2).map(str::to_string).collect();
-        let first_two_lines_stout: Vec<String> =
-            stdout.lines().take(2).map(str::to_string).collect();
-        Err(PingDetectionError::UnknownPing {
-            stdout: first_two_lines_stout,
-            stderr: first_two_lines_stderr,
-        })
+        if stderr.contains("BusyBox") {
+            Ok(LinuxPinger::BusyBox(options))
+        } else if stdout.contains("iputils") {
+            Ok(LinuxPinger::IPTools(options))
+        } else if stdout.contains("inetutils") {
+            Err(PingCreationError::NotSupported {
+                alternative: "Please use iputils ping, not inetutils.".to_string(),
+            })
+        } else {
+            let first_two_lines_stderr: Vec<String> =
+                stderr.lines().take(2).map(str::to_string).collect();
+            let first_two_lines_stout: Vec<String> =
+                stdout.lines().take(2).map(str::to_string).collect();
+            Err(PingCreationError::UnknownPing {
+                stdout: first_two_lines_stout,
+                stderr: first_two_lines_stderr,
+            })
+        }
     }
-}
-
-#[derive(Default)]
-pub struct LinuxPinger {
-    interval: Duration,
-    interface: Option<String>,
 }
 
 impl Pinger for LinuxPinger {
-    fn set_interval(&mut self, interval: Duration) {
-        self.interval = interval;
+    fn from_options(options: PingOptions) -> Result<Self, PingCreationError>
+    where
+        Self: Sized,
+    {
+        Self::detect_platform_ping(options)
     }
 
-    fn set_interface(&mut self, interface: Option<String>) {
-        self.interface = interface;
-    }
-
-    fn ping_args(&self, target: String) -> (&str, Vec<String>) {
-        // The -O flag ensures we "no answer yet" messages from ping
-        // See https://superuser.com/questions/270083/linux-ping-show-time-out
-        let mut args = vec![
-            "-O".to_string(),
-            format!("-i{:.1}", self.interval.as_millis() as f32 / 1_000_f32),
-        ];
-        if let Some(interface) = &self.interface {
-            args.push("-I".into());
-            args.push(interface.clone());
+    fn parse_fn(&self) -> fn(String) -> Option<PingResult> {
+        |line| {
+            #[cfg(test)]
+            eprintln!("Got line {line}");
+            if line.starts_with("64 bytes from") {
+                return extract_regex(&UBUNTU_RE, line);
+            } else if line.starts_with("no answer yet") {
+                return Some(PingResult::Timeout(line));
+            }
+            None
         }
-        args.push(target);
-        ("ping", args)
-    }
-}
-
-#[derive(Default)]
-pub struct AlpinePinger {
-    interval: Duration,
-    interface: Option<String>,
-}
-
-// Alpine doesn't support timeout notifications, so we don't add the -O flag here
-impl Pinger for AlpinePinger {
-    fn set_interval(&mut self, interval: Duration) {
-        self.interval = interval;
     }
 
-    fn set_interface(&mut self, interface: Option<String>) {
-        self.interface = interface;
-    }
-}
+    fn ping_args(&self) -> (&str, Vec<String>) {
+        match self {
+            // Alpine doesn't support timeout notifications, so we don't add the -O flag here.
+            LinuxPinger::BusyBox(options) => {
+                let cmd = if options.target.is_ipv6() {
+                    "ping6"
+                } else {
+                    "ping"
+                };
 
-lazy_static! {
-    static ref UBUNTU_RE: Regex =
-        Regex::new(r"(?i-u)time=(?P<ms>\d+)(?:\.(?P<ns>\d+))? *ms").unwrap();
-}
+                let mut args = vec![
+                    options.target.to_string(),
+                    format!("-i{:.1}", options.interval.as_millis() as f32 / 1_000_f32),
+                ];
 
-#[derive(Default)]
-pub struct LinuxParser {}
+                if let Some(raw_args) = &options.raw_arguments {
+                    args.extend(raw_args.iter().cloned());
+                }
 
-impl Parser for LinuxParser {
-    fn parse(&self, line: String) -> Option<PingResult> {
-        if line.starts_with("64 bytes from") {
-            return self.extract_regex(&UBUNTU_RE, line);
-        } else if line.starts_with("no answer yet") {
-            return Some(PingResult::Timeout(line));
+                (cmd, args)
+            }
+            LinuxPinger::IPTools(options) => {
+                let cmd = if options.target.is_ipv6() {
+                    "ping6"
+                } else {
+                    "ping"
+                };
+
+                // The -O flag ensures we "no answer yet" messages from ping
+                // See https://superuser.com/questions/270083/linux-ping-show-time-out
+                let mut args = vec![
+                    "-O".to_string(),
+                    format!("-i{:.1}", options.interval.as_millis() as f32 / 1_000_f32),
+                ];
+                if let Some(interface) = &options.interface {
+                    args.push("-I".into());
+                    args.push(interface.clone());
+                }
+                if let Some(raw_args) = &options.raw_arguments {
+                    args.extend(raw_args.iter().cloned());
+                }
+
+                args.push(options.target.to_string());
+                (cmd, args)
+            }
         }
-        None
     }
 }
 
@@ -111,13 +116,20 @@ mod tests {
     fn test_linux_detection() {
         use super::*;
         use os_info::Type;
-        let ping_type = detect_linux_ping().expect("Error getting ping");
+        use std::time::Duration;
+
+        let platform = LinuxPinger::detect_platform_ping(PingOptions::new(
+            "foo.com".to_string(),
+            Duration::from_secs(1),
+            None,
+        ))
+        .unwrap();
         match os_info::get().os_type() {
             Type::Alpine => {
-                assert_eq!(ping_type, LinuxPingType::BusyBox)
+                assert!(matches!(platform, LinuxPinger::BusyBox(_)))
             }
             Type::Ubuntu => {
-                assert_eq!(ping_type, LinuxPingType::IPTools)
+                assert!(matches!(platform, LinuxPinger::IPTools(_)))
             }
             _ => {}
         }

@@ -1,40 +1,62 @@
-use crate::{Parser, PingError, PingResult, Pinger};
-use anyhow::Result;
-use dns_lookup::lookup_host;
-use regex::Regex;
-use std::net::IpAddr;
+use crate::target::{IPVersion, Target};
+use crate::PingCreationError;
+use crate::{extract_regex, PingOptions, PingResult, Pinger};
+use lazy_regex::*;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use winping::{Buffer, Pinger as WinPinger};
 
-lazy_static! {
-    static ref RE: Regex = Regex::new(r"(?ix-u)time=(?P<ms>\d+)(?:\.(?P<ns>\d+))?").unwrap();
-}
+pub static RE: Lazy<Regex> = lazy_regex!(r"(?ix-u)time=(?P<ms>\d+)(?:\.(?P<ns>\d+))?");
 
-#[derive(Default)]
 pub struct WindowsPinger {
-    interval: Duration,
-    interface: Option<String>,
+    options: PingOptions,
 }
 
 impl Pinger for WindowsPinger {
-    fn start<P>(&self, target: String) -> Result<mpsc::Receiver<PingResult>>
-    where
-        P: Parser,
-    {
-        let interval = self.interval;
-        let parsed_ip: IpAddr = match target.parse() {
-            Err(_) => {
-                let things = lookup_host(target.as_str())?;
-                if things.is_empty() {
-                    Err(PingError::HostnameError(target))
-                } else {
-                    Ok(things[0])
-                }
+    fn from_options(options: PingOptions) -> Result<Self, PingCreationError> {
+        Ok(Self { options })
+    }
+
+    fn parse_fn(&self) -> fn(String) -> Option<PingResult> {
+        |line| {
+            if line.contains("timed out") || line.contains("failure") {
+                return Some(PingResult::Timeout(line));
             }
-            Ok(addr) => Ok(addr),
-        }?;
+            extract_regex(&RE, line)
+        }
+    }
+
+    fn ping_args(&self) -> (&str, Vec<String>) {
+        unimplemented!("ping_args for WindowsPinger is not implemented")
+    }
+
+    fn start(&self) -> Result<mpsc::Receiver<PingResult>, PingCreationError> {
+        let interval = self.options.interval;
+        let parsed_ip = match &self.options.target {
+            Target::IP(ip) => ip.clone(),
+            Target::Hostname { domain, version } => {
+                let ips = (domain.as_str(), 0).to_socket_addrs()?;
+                let selected_ips: Vec<_> = if *version == IPVersion::Any {
+                    ips.collect()
+                } else {
+                    ips.into_iter()
+                        .filter(|addr| {
+                            if *version == IPVersion::V6 {
+                                matches!(addr.ip(), IpAddr::V6(_))
+                            } else {
+                                matches!(addr.ip(), IpAddr::V4(_))
+                            }
+                        })
+                        .collect()
+                };
+                if selected_ips.is_empty() {
+                    return Err(PingCreationError::HostnameError(domain.clone()).into());
+                }
+                selected_ips[0].ip()
+            }
+        };
 
         let (tx, rx) = mpsc::channel();
 
@@ -66,25 +88,5 @@ impl Pinger for WindowsPinger {
         });
 
         Ok(rx)
-    }
-
-    fn set_interval(&mut self, interval: Duration) {
-        self.interval = interval;
-    }
-
-    fn set_interface(&mut self, interface: Option<String>) {
-        self.interface = interface;
-    }
-}
-
-#[derive(Default)]
-pub struct WindowsParser {}
-
-impl Parser for WindowsParser {
-    fn parse(&self, line: String) -> Option<PingResult> {
-        if line.contains("timed out") || line.contains("failure") {
-            return Some(PingResult::Timeout(line));
-        }
-        self.extract_regex(&RE, line)
     }
 }

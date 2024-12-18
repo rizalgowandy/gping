@@ -1,3 +1,4 @@
+use anyhow::Context;
 use chrono::prelude::*;
 use core::option::Option;
 use core::option::Option::{None, Some};
@@ -19,9 +20,11 @@ impl PlotData {
     pub fn new(display: String, buffer: u64, style: Style, simple_graphics: bool) -> PlotData {
         PlotData {
             display,
-            data: Vec::with_capacity(150), // ringbuffer::FixedRingBuffer::new(capacity),
+            data: Vec::with_capacity(150),
             style,
-            buffer: chrono::Duration::seconds(buffer as i64),
+            buffer: chrono::Duration::try_seconds(buffer as i64)
+                .with_context(|| format!("Error converting {buffer} to seconds"))
+                .unwrap(),
             simple_graphics,
         }
     }
@@ -52,8 +55,8 @@ impl PlotData {
             .data
             .iter()
             .filter(|(_, x)| !x.is_nan())
-            .sorted_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map(|(_, v)| v)
+            .sorted_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .collect();
         if items.is_empty() {
             return vec![ping_header];
@@ -61,10 +64,13 @@ impl PlotData {
 
         let min = **items.first().unwrap();
         let max = **items.last().unwrap();
-        let avg = items.iter().fold(0f64, |sum, &item| sum + item) / items.len() as f64;
-        let jtr = items.iter().enumerate().fold(0f64, |sum, (idx, &item)| {
-            sum + (*items.get(idx + 1).unwrap_or(&item) - item).abs()
-        }) / (items.len() - 1) as f64;
+        let avg = items.iter().copied().sum::<f64>() / items.len() as f64;
+        let jtr = items
+            .iter()
+            .zip(items.iter().skip(1))
+            .map(|(&prev, &curr)| (curr - prev).abs())
+            .sum::<f64>()
+            / (items.len() - 1) as f64;
 
         let percentile_position = 0.95 * items.len() as f32;
         let rounded_position = percentile_position.round() as usize;
