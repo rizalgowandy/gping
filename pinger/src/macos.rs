@@ -1,56 +1,47 @@
-use crate::{Parser, PingResult, Pinger};
-use regex::Regex;
-use std::net::Ipv6Addr;
-use std::time::Duration;
+use crate::bsd::parse_bsd;
+use crate::{PingCreationError, PingOptions, PingResult, Pinger};
+use lazy_regex::*;
 
-lazy_static! {
-    static ref RE: Regex = Regex::new(r"time=(?:(?P<ms>[0-9]+).(?P<ns>[0-9]+)\s+ms)").unwrap();
-}
+pub static RE: Lazy<Regex> = lazy_regex!(r"time=(?:(?P<ms>[0-9]+).(?P<ns>[0-9]+)\s+ms)");
 
-#[derive(Default)]
 pub struct MacOSPinger {
-    interval: Duration,
-    interface: Option<String>,
+    options: PingOptions,
 }
 
 impl Pinger for MacOSPinger {
-    fn set_interval(&mut self, interval: Duration) {
-        self.interval = interval;
+    fn from_options(options: PingOptions) -> Result<Self, PingCreationError>
+    where
+        Self: Sized,
+    {
+        Ok(Self { options })
     }
 
-    fn set_interface(&mut self, interface: Option<String>) {
-        self.interface = interface;
+    fn parse_fn(&self) -> fn(String) -> Option<PingResult> {
+        parse_bsd
     }
 
-    fn ping_args(&self, target: String) -> (&str, Vec<String>) {
-        let cmd = match target.parse::<Ipv6Addr>() {
-            Ok(_) => "ping6",
-            Err(_) => "ping",
+    fn ping_args(&self) -> (&str, Vec<String>) {
+        let cmd = if self.options.target.is_ipv6() {
+            "ping6"
+        } else {
+            "ping"
         };
         let mut args = vec![
-            format!("-i{:.1}", self.interval.as_millis() as f32 / 1_000_f32),
-            target,
+            format!(
+                "-i{:.1}",
+                self.options.interval.as_millis() as f32 / 1_000_f32
+            ),
+            self.options.target.to_string(),
         ];
-        if let Some(interface) = &self.interface {
+        if let Some(interface) = &self.options.interface {
             args.push("-b".into());
             args.push(interface.clone());
         }
 
+        if let Some(raw_args) = &self.options.raw_arguments {
+            args.extend(raw_args.iter().cloned());
+        }
+
         (cmd, args)
-    }
-}
-
-#[derive(Default)]
-pub struct MacOSParser {}
-
-impl Parser for MacOSParser {
-    fn parse(&self, line: String) -> Option<PingResult> {
-        if line.starts_with("PING ") {
-            return None;
-        }
-        if line.starts_with("Request timeout") {
-            return Some(PingResult::Timeout(line));
-        }
-        self.extract_regex(&RE, line)
     }
 }
