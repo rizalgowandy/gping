@@ -30,17 +30,20 @@ Table of Contents
   * [MacPorts](https://ports.macports.org/port/gping/): `sudo port install gping`
 * Linux (Homebrew): `brew install gping`
 * CentOS (and other distributions with an old glibc): Download the MUSL build from the latest release
-* Windows/ARM: 
+* Windows/ARM:
   * Scoop: `scoop install gping`
   * Chocolatey: `choco install gping`
   * Download the latest release from [the github releases page](https://github.com/orf/gping/releases)
 * Fedora ([COPR](https://copr.fedorainfracloud.org/coprs/atim/gping/)): `sudo dnf copr enable atim/gping -y && sudo dnf install gping`
-* Cargo (**This requires `rustc` version 1.44.0 or greater**): `cargo install gping`
+* Cargo (**This requires `rustc` version 1.67.0 or greater**): `cargo install gping`
 * Arch Linux: `pacman -S gping`
-* Ubuntu/Debian ([Azlux's repo](http://packages.azlux.fr/)):
+* Alpine linux: `apk add gping`
+* Ubuntu >23.10/Debian >13: `apt install gping`
+* Ubuntu/Debian ([Azlux's repo](https://packages.azlux.fr/)):
 ```bash
-echo "deb http://packages.azlux.fr/debian/ buster main" | sudo tee /etc/apt/sources.list.d/azlux.list
-wget -qO - https://azlux.fr/repo.gpg.key | sudo apt-key add -
+echo 'deb [signed-by=/usr/share/keyrings/azlux.gpg] https://packages.azlux.fr/debian/ bookworm main' | sudo tee /etc/apt/sources.list.d/azlux.list
+sudo apt install gpg
+curl -s https://azlux.fr/repo.gpg.key | gpg --dearmor | sudo tee /usr/share/keyrings/azlux.gpg > /dev/null
 sudo apt update
 sudo apt install gping
 ```
@@ -53,10 +56,22 @@ sudo emerge net-misc/gping::dm9pZCAq
 * FreeBSD:
   * [pkg](https://www.freshports.org/net-mgmt/gping/): `pkg install gping`
   * [ports](https://cgit.freebsd.org/ports/tree/net-mgmt/gping) `cd /usr/ports/net-mgmt/gping; make install clean`
+* Docker:
+```sh
+# Check all options
+docker run --rm -ti --network host ghcr.io/orf/gping:gping-v1.15.1 --help
+# Ping google.com
+docker run --rm -ti --network host ghcr.io/orf/gping:gping-v1.15.1 google.com
+```
+* Flox:
+```sh
+# Inside of a Flox environment
+flox install gping
+```
 
 # Usage :saxophone:
 
-Just run `gping [host]`. `host` can be a command like `curl google.com` if the `--cmd` flag is used. You can also use 
+Just run `gping [host]`. `host` can be a command like `curl google.com` if the `--cmd` flag is used. You can also use
 shorthands like `aws:eu-west-1` or `aws:ca-central-1` to ping specific cloud regions. Only `aws` is currently supported.
 
 ```bash
@@ -93,4 +108,6 @@ Options:
           Print help information
   -V, --version
           Print version information
+      --clear
+          Clear the graph from the terminal after closing the program
 ```
